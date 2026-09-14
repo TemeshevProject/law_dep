@@ -1,0 +1,484 @@
+# Приложение Б. Машиночитаемый формат шаблонов чек-листов
+#
+# Формат для импорта/экспорта шаблонов (ТЗ, раздел 5.14) и для версионирования настроек
+# в git. Источник формулировок и критериев — docs/checklists-by-role.md; здесь приведены
+# полностью шаблоны трёх ролей как эталон формата. Остальные роли описываются аналогично.
+#
+# Схема:
+#   version            — версия формата файла
+#   context_attributes — атрибуты карточки договора, доступные в выражениях applicability
+#   templates[]        — шаблоны чек-листов
+#     code, name, role_code, template_version, status, is_mandatory
+#     applicability    — условие применимости шаблона целиком (пусто = всегда)
+#     sections[]       — разделы с пунктами
+#       items[]
+#         code                  — стабильный код пункта (не меняется при правке формулировки)
+#         title                 — проверяемое утверждение
+#         hint                  — критерий проверки
+#         answer_type           — yes_no_na | yes_no | value | select | auto
+#         severity              — blocking | major | info
+#         required              — обязателен ли ответ для завершения шага
+#         requires_comment_if   — no | na | any | never
+#         requires_attachment_if— no | always | never
+#         applicability         — условие показа пункта; в выражениях доступны
+#                                 context_attributes и значения из блока thresholds
+#         options               — допустимые значения для answer_type: select
+#         auto_source           — источник автозначения (см. ТЗ 5.13)
+#         reset_on[]            — события инвалидации ответа при новой версии договора
+#         on_fail_route_to      — роль-адресат замечания по умолчанию
+
+version: 1
+
+context_attributes:
+  - key: contract.type
+    type: enum
+    values: [supply, services, works, lease, license_ip, nda, agency, loan, foreign_trade, framework]
+  - key: contract.form_origin
+    type: enum
+    values: [our_template, counterparty_template, negotiated]
+  - key: contract.amount
+    type: decimal
+  - key: contract.currency
+    type: string
+  - key: contract.is_unlimited_amount
+    type: boolean
+  - key: contract.has_advance
+    type: boolean
+  - key: contract.advance_share
+    type: decimal
+  - key: contract.has_auto_renewal
+    type: boolean
+  - key: contract.deviates_from_template
+    type: boolean
+  - key: counterparty.is_resident
+    type: boolean
+  - key: counterparty.tax_regime
+    type: enum
+    values: [osno, usn, ausn, npd, patent, eshn, foreign, unknown]
+  - key: counterparty.is_individual
+    type: boolean
+  - key: flags.personal_data_transfer
+    type: boolean
+  - key: flags.it_infrastructure_access
+    type: boolean
+  - key: flags.ip_creation
+    type: boolean
+  - key: flags.works_on_site
+    type: boolean
+  - key: flags.licensed_activity
+    type: boolean
+
+thresholds:
+  # Значения требуют утверждения владельцем процесса (ТЗ, раздел 14, вопрос 4)
+  advance_guarantee_required_share: 0.30
+  security_review_amount: 3000000
+  tco_required_amount: 10000000
+  solvency_check_amount: 5000000
+
+templates:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - code: initiator_base
+    name: "Инициатор: комплектность и данные карточки"
+    role_code: initiator
+    template_version: 1
+    status: active
+    is_mandatory: true
+    applicability: null
+    sections:
+      - name: "Комплектность и данные"
+        items:
+          - code: INI-001
+            title: "Тип договора выбран верно, использована актуальная версия типовой формы"
+            hint: "Система сверяет версию шаблона с реестром типовых форм"
+            answer_type: auto
+            severity: blocking
+            required: true
+            auto_source: template_registry.current_version_match
+            on_fail_route_to: initiator
+          - code: INI-002
+            title: "Предмет договора соответствует потребности, приложена заявка/обоснование"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            requires_attachment_if: always
+          - code: INI-003
+            title: "Сумма, валюта и признак НДС в карточке совпадают с текстом договора и спецификацией"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            reset_on: [file_changed, amount_changed]
+          - code: INI-004
+            title: "Срок действия и сроки исполнения указаны; ретро-дата обоснована"
+            hint: "При дате начала ранее текущей даты обязательно обоснование"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            requires_comment_if: na
+            reset_on: [dates_changed]
+          - code: INI-005
+            title: "Указаны бюджетная статья и ЦФО"
+            answer_type: auto
+            severity: blocking
+            required: true
+            auto_source: contract.budget_line_filled
+          - code: INI-006
+            title: "Приложены все приложения: спецификация/ТЗ, график платежей, формы акта"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            requires_attachment_if: always
+          - code: INI-007
+            title: "Приложения пронумерованы, ссылки между договором и приложениями корректны"
+            answer_type: yes_no_na
+            severity: major
+            required: true
+          - code: INI-008
+            title: "В тексте нет незаполненных полей и плейсхолдеров"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            reset_on: [file_changed]
+          - code: INI-009
+            title: "Приложено обоснование выбора контрагента (итоги процедуры либо единственный поставщик)"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            requires_attachment_if: always
+          - code: INI-010
+            title: "Назначены ответственные за приёмку и за контроль исполнения"
+            answer_type: yes_no_na
+            severity: major
+            required: true
+          - code: INI-011
+            title: "Указан способ подписания; техническая возможность ЭДО подтверждена"
+            answer_type: auto
+            severity: major
+            required: true
+            auto_source: edo.counterparty_status
+          - code: INI-012
+            title: "Отклонения от типовой формы перечислены с обоснованием"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            applicability: "contract.deviates_from_template == true"
+            requires_comment_if: any
+            reset_on: [file_changed]
+          - code: INI-013
+            title: "Отсутствует действующий договор с тем же предметом и контрагентом"
+            answer_type: auto
+            severity: major
+            required: true
+            auto_source: contracts.duplicate_search
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - code: accountant_base
+    name: "Бухгалтер: реквизиты, налоги, первичные документы"
+    role_code: accountant
+    template_version: 1
+    status: active
+    is_mandatory: true
+    applicability: null
+    sections:
+      - name: "Реквизиты"
+        items:
+          - code: ACC-001
+            title: "Наименование, ИНН/КПП, ОГРН и адрес контрагента совпадают с ЕГРЮЛ и карточкой в учётной системе"
+            answer_type: auto
+            severity: blocking
+            required: true
+            auto_source: egrul.match_with_contract_and_erp
+            reset_on: [counterparty_changed, file_changed]
+            on_fail_route_to: initiator
+          - code: ACC-002
+            title: "Банковские реквизиты подтверждены документом контрагента"
+            hint: "Письмо на бланке или счёт с реквизитами; приложить к пункту"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            requires_attachment_if: always
+            reset_on: [counterparty_changed, file_changed]
+          - code: ACC-003
+            title: "БИК действующий, номер счёта корректен и принадлежит указанному банку"
+            answer_type: auto
+            severity: blocking
+            required: true
+            auto_source: bank_directory.validate_account
+          - code: ACC-004
+            title: "Реквизиты не менялись после переговоров; при изменении получено подтверждение по независимому каналу"
+            hint: "Антифрод: перезвонить по известному номеру, не по указанному в письме об изменении"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            requires_comment_if: no
+            reset_on: [counterparty_changed]
+          - code: ACC-005
+            title: "Реквизиты компании в договоре указаны верно и актуальны"
+            answer_type: auto
+            severity: major
+            required: true
+            auto_source: company.own_details_match
+      - name: "Налоговый режим и НДС"
+        items:
+          - code: ACC-006
+            title: "Система налогообложения контрагента определена, подтверждение приложено"
+            answer_type: select
+            severity: blocking
+            required: true
+            requires_attachment_if: always
+            options: [osno, usn, ausn, npd, patent, eshn, foreign]
+          - code: ACC-007
+            title: "Формулировка о НДС соответствует режиму контрагента"
+            hint: "Для УСН: 'НДС не облагается в связи с применением УСН'; для ОСНО — ставка и сумма"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            reset_on: [file_changed, amount_changed]
+          - code: ACC-008
+            title: "Цена указана однозначно 'с НДС'/'без НДС' без расхождений между договором, спецификацией и графиком платежей"
+            answer_type: auto
+            severity: blocking
+            required: true
+            auto_source: calc.vat_consistency
+            reset_on: [file_changed, amount_changed]
+          - code: ACC-009
+            title: "Арифметика сходится: сумма позиций, итог и выделенный НДС"
+            answer_type: auto
+            severity: blocking
+            required: true
+            auto_source: calc.totals_check
+            reset_on: [file_changed, amount_changed]
+          - code: ACC-010
+            title: "Контрагент не имеет признаков технической компании"
+            hint: "Отчётность, численность, возраст, отсутствие массового адреса/руководителя"
+            answer_type: auto
+            severity: blocking
+            required: true
+            auto_source: counterparty_check.risk_profile
+            requires_attachment_if: always
+          - code: ACC-011
+            title: "Задолженность контрагента по налогам проверена, результат сохранён"
+            answer_type: auto
+            severity: major
+            required: true
+            auto_source: fns.tax_debt
+          - code: ACC-012
+            title: "Статус НПД подтверждён на дату заключения; предусмотрена обязанность предоставлять чек и уведомлять об утрате статуса"
+            answer_type: auto
+            severity: blocking
+            required: true
+            applicability: "counterparty.tax_regime == 'npd'"
+            auto_source: fns.npd_status
+            requires_attachment_if: always
+          - code: ACC-013
+            title: "Отсутствуют признаки трудовых отношений"
+            hint: "График, подчинённость, рабочее место, регулярная фиксированная оплата, единственный заказчик"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            applicability: "counterparty.tax_regime == 'npd' OR (counterparty.is_individual == true)"
+          - code: ACC-014
+            title: "Определены обязанности налогового агента по НДС и налогу на прибыль"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            applicability: "counterparty.is_resident == false"
+          - code: ACC-015
+            title: "Сертификат налогового резидентства получен/запрошен, применение СИДН обосновано"
+            answer_type: yes_no_na
+            severity: major
+            required: true
+            applicability: "counterparty.is_resident == false"
+            requires_attachment_if: always
+      - name: "Документооборот и учёт"
+        items:
+          - code: ACC-016
+            title: "Перечень и формы первичных документов определены, сроки предоставления указаны"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+          - code: ACC-017
+            title: "Порядок и сроки выставления счетов-фактур соответствуют требованиям"
+            answer_type: yes_no_na
+            severity: major
+            required: true
+          - code: ACC-018
+            title: "Канал обмена документами определён и технически возможен"
+            answer_type: auto
+            severity: major
+            required: true
+            auto_source: edo.counterparty_status
+          - code: ACC-019
+            title: "Порядок учёта аванса и его зачёта описан, НДС с аванса учтён"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            applicability: "contract.has_advance == true"
+          - code: ACC-020
+            title: "Определены счёт затрат, статья/номенклатурная группа и объект учёта"
+            answer_type: auto
+            severity: major
+            required: true
+            auto_source: erp.cost_allocation_filled
+          - code: ACC-021
+            title: "Периодичность закрывающих документов соответствует периодам учёта"
+            answer_type: yes_no_na
+            severity: major
+            required: true
+          - code: ACC-022
+            title: "Валюта договора и платежа, курс и дата пересчёта определены"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            applicability: "contract.currency != 'RUB'"
+          - code: ACC-023
+            title: "Требования валютного контроля учтены: постановка на учёт, сроки репатриации, коды операций"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            applicability: "contract.currency != 'RUB' OR counterparty.is_resident == false"
+          - code: ACC-024
+            title: "Порядок оформления неустоек, скидок и премий определён"
+            answer_type: yes_no_na
+            severity: info
+            required: false
+          - code: ACC-025
+            title: "Данных достаточно для учёта права пользования активом"
+            answer_type: yes_no_na
+            severity: major
+            required: true
+            applicability: "contract.type == 'lease'"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - code: finance_controller_base
+    name: "Финансист: бюджет, платежи, финансовые риски"
+    role_code: finance_controller
+    template_version: 1
+    status: active
+    is_mandatory: true
+    applicability: null
+    sections:
+      - name: "Бюджет и лимиты"
+        items:
+          - code: FIN-001
+            title: "Расход соответствует утверждённому бюджету, указана строка со свободным лимитом"
+            answer_type: auto
+            severity: blocking
+            required: true
+            auto_source: budget.limit_available
+            reset_on: [amount_changed]
+            on_fail_route_to: initiator
+          - code: FIN-002
+            title: "Классификация расхода верна (CAPEX/OPEX, капитализация)"
+            answer_type: yes_no_na
+            severity: major
+            required: true
+          - code: FIN-003
+            title: "При превышении лимита приложено решение о корректировке бюджета"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            applicability: "budget.limit_exceeded == true"
+            requires_attachment_if: always
+      - name: "Платежи и денежный поток"
+        items:
+          - code: FIN-004
+            title: "График платежей построен, суммы и даты согласуются с условиями договора"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            reset_on: [amount_changed, payment_terms_changed, dates_changed]
+          - code: FIN-005
+            title: "Влияние на cash flow по месяцам рассчитано и приемлемо"
+            answer_type: auto
+            severity: major
+            required: true
+            auto_source: treasury.cashflow_impact
+          - code: FIN-006
+            title: "Условия оплаты соответствуют политике: доля аванса и срок постоплаты в пределах норматива"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            reset_on: [payment_terms_changed]
+          - code: FIN-007
+            title: "При авансе выше порога предусмотрено обеспечение"
+            hint: "Банковская гарантия, поручительство, залог, удержание"
+            answer_type: yes_no_na
+            severity: blocking
+            required: true
+            applicability: "contract.advance_share > thresholds.advance_guarantee_required_share"
+            requires_attachment_if: always
+          - code: FIN-008
+            title: "Отсутствуют невозвратные платежи и платежи до получения результата без обеспечения"
+            answer_type: yes_no_na
+            severity: major
+            required: true
+      - name: "Финансовые риски"
+        items:
+          - code: FIN-009
+            title: "Механизм индексации/изменения цены ограничен потолком и периодичностью, эффект рассчитан"
+            answer_type: yes_no_na
+            severity: major
+            required: true
+          - code: FIN-010
+            title: "Курсовой риск оценён: дата курса определена, при необходимости предусмотрено хеджирование"
+            answer_type: yes_no_na
+            severity: major
+            required: true
+            applicability: "contract.currency != 'RUB'"
+          - code: FIN-011
+            title: "Рассчитана полная стоимость владения за весь срок, включая пролонгации и обязательные опции"
+            answer_type: yes_no_na
+            severity: major
+            required: true
+            applicability: "contract.amount > thresholds.tco_required_amount"
+            requires_attachment_if: always
+          - code: FIN-012
+            title: "Автопролонгация выявлена, срок уведомления об отказе поставлен на контроль"
+            answer_type: auto
+            severity: blocking
+            required: true
+            applicability: "contract.has_auto_renewal == true"
+            auto_source: contract.auto_renewal_control_date
+          - code: FIN-013
+            title: "Скрытые финансовые обязательства отсутствуют (take-or-pay, штраф за досрочный выход, платные лимиты)"
+            answer_type: yes_no_na
+            severity: major
+            required: true
+          - code: FIN-014
+            title: "Санкции в пользу компании достаточны; наши обязательства по неустойке ограничены"
+            answer_type: yes_no_na
+            severity: major
+            required: true
+          - code: FIN-015
+            title: "Платёжеспособность контрагента подтверждена"
+            hint: "Отчётность, долги, суды, исполнительные производства"
+            answer_type: auto
+            severity: blocking
+            required: true
+            applicability: "contract.has_advance == true OR contract.amount > thresholds.solvency_check_amount"
+            auto_source: counterparty_check.financials
+            requires_attachment_if: always
+          - code: FIN-016
+            title: "Лимит риска на контрагента/группу не превышен"
+            answer_type: auto
+            severity: major
+            required: true
+            auto_source: risk.counterparty_exposure
+          - code: FIN-017
+            title: "Приложен расчёт экономического эффекта/окупаемости"
+            answer_type: yes_no_na
+            severity: major
+            required: true
+            applicability: "contract.amount > thresholds.tco_required_amount"
+            requires_attachment_if: always
+          - code: FIN-018
+            title: "Условия оплаты не создают кассового разрыва с договорами на стороне выручки"
+            answer_type: yes_no_na
+            severity: info
+            required: false
+
+# Остальные шаблоны (lawyer_base, lawyer_foreign_trade, procurement_base, security_compliance_base,
+# infosec_personal_data, technical_expert_base, signatory_base, contract_admin_base,
+# department_head_base) описываются в том же формате; формулировки и уровни критичности —
+# в docs/checklists-by-role.md, разделы 2-4 и 7-11.
