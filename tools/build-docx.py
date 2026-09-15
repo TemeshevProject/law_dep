@@ -52,6 +52,52 @@ APPENDIX_B_INTRO = """# Приложение Б. Машиночитаемый ф
 """
 
 
+def proportional_table_widths(text: str, budget: int = 180, cap: int = 80) -> str:
+    """Задать ширину колонок пропорционально содержимому.
+
+    Pandoc берёт относительную ширину колонок из числа дефисов в строке-разделителе
+    pipe-таблицы. В исходных файлах разделители записаны как `|---|`, поэтому в Word
+    все колонки получают равную ширину: узкие («Блок», «Флаги») раздуваются,
+    а колонка с формулировкой сжимается. Здесь разделитель перестраивается по
+    фактической длине содержимого, с ограничением cap, чтобы одна длинная колонка
+    не вытеснила остальные.
+    """
+    separator = re.compile(r"^\|(?:\s*:?-{2,}:?\s*\|)+\s*$")
+    lines = text.split("\n")
+    blocks: list[tuple[int, int]] = []
+    start = None
+    for i, line in enumerate(lines + [""]):
+        if line.startswith("|"):
+            start = i if start is None else start
+        elif start is not None:
+            blocks.append((start, i))
+            start = None
+
+    for first, last in blocks:
+        rows = [lines[i] for i in range(first, last)]
+        sep_idx = next((i for i, r in enumerate(rows) if separator.match(r)), None)
+        if sep_idx is None:
+            continue
+        cells = [[c.strip() for c in r.strip().strip("|").split("|")] for r in rows]
+        columns = len(cells[sep_idx])
+        if columns < 2:
+            continue
+        weights = []
+        for col in range(columns):
+            longest = max(
+                (len(row[col]) for row in cells if len(row) == columns and row is not cells[sep_idx]),
+                default=3,
+            )
+            # +5 и нижняя граница: короткие колонки («Код», «Блок») не должны
+            # сжиматься до переноса собственного заголовка
+            weights.append(max(min(longest, cap) + 5, 10))
+        total = sum(weights)
+        dashes = [max(3, round(w / total * budget)) for w in weights]
+        lines[first + sep_idx] = "|" + "|".join("-" * d for d in dashes) + "|"
+
+    return "\n".join(lines)
+
+
 def rewrite_links(text: str) -> str:
     for src, dst in LINK_REWRITES.items():
         text = text.replace(src, dst)
@@ -73,7 +119,8 @@ def build_markdown() -> str:
     appendix_a = rewrite_links(APPENDIX_A.read_text(encoding="utf-8"))
     appendix_b = APPENDIX_B_INTRO + "```yaml\n" + APPENDIX_B.read_text(encoding="utf-8") + "```\n"
 
-    return METADATA + PAGE_BREAK + tz + PAGE_BREAK + appendix_a + PAGE_BREAK + appendix_b
+    body = PAGE_BREAK + tz + PAGE_BREAK + appendix_a
+    return METADATA + proportional_table_widths(body) + PAGE_BREAK + appendix_b
 
 
 def patch_reference(pandoc: str, work: Path) -> Path:
@@ -168,6 +215,32 @@ def patch_reference(pandoc: str, work: Path) -> Path:
     return patched
 
 
+def enable_field_update(docx_path: Path) -> None:
+    """Word должен заполнить поле оглавления при открытии.
+
+    settings.xml pandoc формирует самостоятельно, игнорируя reference.docx,
+    поэтому флаг добавляется в готовый файл. Элемент ставится перед <w:rsids>,
+    чтобы сохранить порядок элементов CT_Settings.
+    """
+    part = "word/settings.xml"
+    with zipfile.ZipFile(docx_path) as z:
+        entries = {name: z.read(name) for name in z.namelist()}
+
+    settings = entries[part].decode("utf-8")
+    if "updateFields" in settings:
+        return
+    flag = '<w:updateFields w:val="true"/>'
+    if "<w:rsids>" in settings:
+        settings = settings.replace("<w:rsids>", f"{flag}<w:rsids>", 1)
+    else:
+        settings = settings.replace("</w:settings>", f"{flag}</w:settings>", 1)
+    entries[part] = settings.encode("utf-8")
+
+    with zipfile.ZipFile(docx_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in entries.items():
+            z.writestr(name, data)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pandoc", default=shutil.which("pandoc") or "pandoc")
@@ -197,6 +270,7 @@ def main() -> int:
             check=True,
         )
 
+    enable_field_update(args.out)
     print(f"готово: {args.out} ({args.out.stat().st_size // 1024} КБ)")
     return 0
 
