@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Сборка единого документа Word из ТЗ и приложений.
+"""Сборка документов Word из исходных файлов в Markdown.
 
 Использование:
-    python3 tools/build-docx.py [--pandoc /path/to/pandoc] [--out FILE]
+    python3 tools/build-docx.py [--target full|short] [--pandoc PATH] [--out FILE]
 
-Требуется pandoc 3.x. Скрипт формирует временный reference.docx (альбомный A4,
-сетка в таблицах, нумерация страниц) и склеивает три исходных файла в один .docx
-с титульным листом и оглавлением.
+Требуется pandoc 3.x. Скрипт формирует временный reference.docx (сетка в таблицах,
+нумерация страниц, автообновление оглавления) и собирает:
+  full  — подробное ТЗ вместе с Приложениями А и Б, альбомный A4 (широкие таблицы);
+  short — краткое ТЗ по ролям, книжный A4.
 """
 
 import argparse
@@ -22,7 +23,11 @@ ROOT = Path(__file__).resolve().parent.parent
 TZ = ROOT / "docs" / "tz-checklists-contract-approval.md"
 APPENDIX_A = ROOT / "docs" / "checklists-by-role.md"
 APPENDIX_B = ROOT / "docs" / "checklists" / "contract-approval-checklists.yaml"
-DEFAULT_OUT = ROOT / "docs" / "tz-checklists-contract-approval.docx"
+SHORT = ROOT / "docs" / "tz-checklists-short.md"
+DEFAULT_OUT = {
+    "full": ROOT / "docs" / "tz-checklists-contract-approval.docx",
+    "short": ROOT / "docs" / "tz-checklists-short.docx",
+}
 
 PAGE_BREAK = '\n\n```{=openxml}\n<w:p><w:r><w:br w:type="page"/></w:r></w:p>\n```\n\n'
 
@@ -41,6 +46,21 @@ lang: ru-RU
 toc-title: "Содержание"
 ---
 """
+
+METADATA_SHORT = """---
+title: "Чек-листы согласования договоров: краткое ТЗ"
+subtitle: "Что проверяет каждая роль. Версия 0.2 (проект)"
+date: "ТОО «Көркем Телеком», 2026"
+lang: ru-RU
+toc-title: "Содержание"
+---
+"""
+
+# В отдельном кратком документе ссылки на файлы репозитория не нужны
+SHORT_LINK_REWRITES = {
+    "(`docs/tz-checklists-contract-approval.md`) и Приложении А\n(`docs/checklists-by-role.md`)":
+        "и Приложении А к нему",
+}
 
 APPENDIX_B_INTRO = """# Приложение Б. Машиночитаемый формат шаблонов чек-листов
 
@@ -90,7 +110,7 @@ def proportional_table_widths(text: str, budget: int = 180, cap: int = 80) -> st
             )
             # +5 и нижняя граница: короткие колонки («Код», «Блок») не должны
             # сжиматься до переноса собственного заголовка
-            weights.append(max(min(longest, cap) + 5, 10))
+            weights.append(max(min(longest, cap) + 5, 14))
         total = sum(weights)
         dashes = [max(3, round(w / total * budget)) for w in weights]
         lines[first + sep_idx] = "|" + "|".join("-" * d for d in dashes) + "|"
@@ -123,7 +143,16 @@ def build_markdown() -> str:
     return METADATA + proportional_table_widths(body) + PAGE_BREAK + appendix_b
 
 
-def patch_reference(pandoc: str, work: Path) -> Path:
+def build_markdown_short() -> str:
+    text = SHORT.read_text(encoding="utf-8")
+    for src, dst in SHORT_LINK_REWRITES.items():
+        text = text.replace(src, dst)
+    # Заголовок первого уровня дублирует титульный лист
+    text = re.sub(r"\A# .*\n", "", text)
+    return METADATA_SHORT + PAGE_BREAK + proportional_table_widths(text, budget=110)
+
+
+def patch_reference(pandoc: str, work: Path, landscape: bool = True) -> Path:
     """reference.docx pandoc по умолчанию: книжная ориентация, таблицы без сетки."""
     ref = work / "reference.docx"
     with ref.open("wb") as fh:
@@ -133,11 +162,17 @@ def patch_reference(pandoc: str, work: Path) -> Path:
     with zipfile.ZipFile(ref) as z:
         z.extractall(unpacked)
 
+    page = (
+        '<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>'
+        if landscape
+        else '<w:pgSz w:w="11906" w:h="16838"/>'
+    )
+    margin = 851 if landscape else 1134
     sect = (
         "<w:sectPr>"
         '<w:footerReference w:type="default" r:id="rIdFtr1"/>'
-        '<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>'
-        '<w:pgMar w:top="851" w:right="851" w:bottom="851" w:left="851"'
+        f"{page}"
+        f'<w:pgMar w:top="{margin}" w:right="{margin}" w:bottom="{margin}" w:left="{margin}"'
         ' w:header="425" w:footer="425" w:gutter="0"/>'
         "</w:sectPr>"
     )
@@ -243,9 +278,11 @@ def enable_field_update(docx_path: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--target", choices=("full", "short"), default="full")
     parser.add_argument("--pandoc", default=shutil.which("pandoc") or "pandoc")
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--out", type=Path)
     args = parser.parse_args()
+    out = args.out or DEFAULT_OUT[args.target]
 
     if not shutil.which(args.pandoc) and not Path(args.pandoc).is_file():
         print(f"pandoc не найден: {args.pandoc}", file=sys.stderr)
@@ -254,8 +291,11 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         combined = work / "combined.md"
-        combined.write_text(build_markdown(), encoding="utf-8")
-        reference = patch_reference(args.pandoc, work)
+        combined.write_text(
+            build_markdown() if args.target == "full" else build_markdown_short(),
+            encoding="utf-8",
+        )
+        reference = patch_reference(args.pandoc, work, landscape=args.target == "full")
         subprocess.run(
             [
                 args.pandoc,
@@ -265,13 +305,13 @@ def main() -> int:
                 f"--reference-doc={reference}",
                 "--toc",
                 "--toc-depth=2",
-                f"--output={args.out}",
+                f"--output={out}",
             ],
             check=True,
         )
 
-    enable_field_update(args.out)
-    print(f"готово: {args.out} ({args.out.stat().st_size // 1024} КБ)")
+    enable_field_update(out)
+    print(f"готово: {out} ({out.stat().st_size // 1024} КБ)")
     return 0
 
 
