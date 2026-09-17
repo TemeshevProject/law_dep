@@ -1,0 +1,566 @@
+# Приложение Б к ТЗ. Машиночитаемый формат шаблонов чек-листов согласования договора
+#
+# Соответствует Правилам управления договорами, доверенностями и внешней корреспонденцией
+# ТОО «Көркем Телеком» (KT_RULE_..._v1): роли — Приложение 2, блоки — Приложение 3,
+# статусы — п. 3.1, блокирующие критерии — Приложение 7.
+#
+# Формулировки и полный состав пунктов по всем ролям — docs/checklists-by-role.md.
+# Здесь полностью описаны шаблоны трёх ролей как эталон формата для остальных.
+#
+# Схема:
+#   version              — версия формата файла
+#   statuses             — четыре статуса пункта по п. 3.1 Правил (изменению не подлежат)
+#   context_attributes   — признаки карточки, доступные в выражениях applicability (п. 3.4)
+#   thresholds           — пороговые значения, требующие утверждения бизнес-владельцем
+#   templates[]          — шаблоны чек-листов
+#     code, name, role_code, template_version, status, is_mandatory
+#     vnd_decision_ref   — ссылка на решение бизнес-владельца, которым утверждена версия (п. 11.3)
+#     applicability      — условие применимости шаблона целиком (null = всегда)
+#     sections[].items[]
+#       code               — стабильный код пункта (используется в отчётности и ВНД)
+#       title              — формулировка подтверждения
+#       hint               — критерий проверки, ссылка на пункт Правил
+#       appendix3_block    — блок Приложения 3, который раскрывает пункт ("A4" — Приложение 4)
+#       applicability      — условие показа пункта
+#       na_allowed         — допустим ли статус «Не применимо» (обоснование обязательно всегда)
+#       risk_allowed       — допустим ли статус «Остаточный риск»; false — устраняется
+#                            только доработкой или получением решения (п. 8.8)
+#       evidence_required  — обязательно вложение-доказательство
+#       auto_source        — источник автопроверки (ТЗ, FR-14)
+#       reset_on[]         — события существенного изменения, аннулирующие подтверждение (п. 3.2.2)
+#       default_assignee   — адресат замечания по умолчанию
+
+version: 1
+
+statuses:
+  - code: confirmed
+    name: "Подтверждено"
+    effect: "Маршрут продолжается"
+  - code: not_applicable
+    name: "Не применимо"
+    effect: "Маршрут продолжается после указания причины"
+    justification_required: true
+  - code: rework_required
+    name: "Требуется доработка"
+    effect: "Автоматическая блокировка направления на подпись"
+  - code: residual_risk
+    name: "Остаточный риск"
+    effect: "Блокировка до решения уполномоченного лица"
+    risk_card_required: true
+# Статус «согласовано с замечаниями» не предусмотрен (п. 3.1.1 Правил).
+
+context_attributes:
+  - key: contract.kind
+    type: enum
+    values: [supply, services, works, lease, license_ip, nda, agency, loan, framework, addendum]
+  - key: contract.form_origin
+    type: enum
+    values: [company_template, counterparty_draft, own_draft]
+  - key: contract.deviates_from_template
+    type: boolean
+  - key: contract.amount
+    type: decimal
+  - key: contract.currency
+    type: string
+  - key: contract.is_framework
+    type: boolean
+  - key: contract.has_advance
+    type: boolean
+  - key: contract.advance_share
+    type: decimal
+  - key: contract.has_auto_renewal
+    type: boolean
+  - key: contract.languages_count
+    type: integer
+  - key: counterparty.is_resident
+    type: boolean
+  - key: counterparty.is_individual
+    type: boolean
+  - key: counterparty.is_vat_payer
+    type: boolean
+  - key: counterparty.tax_regime
+    type: enum
+    values: [general, special_regime, individual_entrepreneur, natural_person, non_resident, unknown]
+  - key: flags.has_technical_part
+    type: boolean
+  - key: flags.monetary_obligations
+    type: boolean
+  - key: flags.ip_or_software
+    type: boolean
+  - key: flags.data_processing
+    type: boolean
+  - key: flags.personal_data
+    type: boolean
+  - key: flags.confidentiality
+    type: boolean
+  - key: flags.it_access
+    type: boolean
+  - key: flags.state_body_involved
+    type: boolean
+  - key: flags.ppp_project
+    type: boolean
+  - key: flags.public_procurement
+    type: boolean
+  - key: flags.branch_involved
+    type: boolean
+  - key: flags.works_on_site
+    type: boolean
+  - key: flags.licensed_activity
+    type: boolean
+  - key: procurement.conducted
+    type: boolean
+
+thresholds:
+  # Требуют утверждения бизнес-владельцем (ТЗ, раздел 14, вопрос 11)
+  advance_guarantee_share: null
+  compliance_review_amount: null
+  financial_model_amount: null
+  solvency_check_amount: null
+
+templates:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - code: initiator_approval
+    name: "Инициатор: карточка, пакет, деловые условия"
+    role_code: INI
+    template_version: 1
+    status: draft
+    is_mandatory: true
+    vnd_decision_ref: null
+    applicability: null
+    sections:
+      - name: "Карточка и пакет документов"
+        items:
+          - code: INI-01
+            title: "Карточка создана до начала официального согласования; инициатор и создатель карточки указаны отдельно"
+            hint: "пп. 3.1, 4.1.2 Правил"
+            appendix3_block: 1
+            na_allowed: false
+            risk_allowed: true
+            auto_source: card.roles_separated
+          - code: INI-02
+            title: "Приложен проект договора в Word со всеми приложениями и материалами минимального пакета"
+            hint: "п. 4.1.4 Правил"
+            appendix3_block: 1
+            na_allowed: false
+            risk_allowed: false
+            evidence_required: true
+          - code: INI-03
+            title: "Использована утверждённая типовая форма Компании либо зафиксирована обоснованная необходимость отступления"
+            hint: "п. 4.1.3 Правил"
+            appendix3_block: 1
+            na_allowed: false
+            risk_allowed: true
+            auto_source: template_registry.form_match
+          - code: INI-05
+            title: "Приложено основание выбора контрагента либо результат закупочного процесса"
+            hint: "п. 4.1.4 Правил"
+            appendix3_block: 1
+            na_allowed: false
+            risk_allowed: true
+            evidence_required: true
+          - code: INI-15
+            title: "Ответственный за исполнение определён; по каждому существенному обязательству предложен контролёр"
+            hint: "пп. 4.1.1, 4.4.2 Правил"
+            appendix3_block: 1
+            na_allowed: false
+            risk_allowed: true
+      - name: "Деловые условия"
+        items:
+          - code: INI-04
+            title: "Цель договора, ожидаемый результат и деловая потребность описаны в карточке"
+            appendix3_block: 2
+            na_allowed: false
+            risk_allowed: true
+          - code: INI-06
+            title: "Данные контрагента корректны: наименование, БИН или ИИН, организационно-правовая форма, адрес, контактные данные"
+            appendix3_block: 3
+            na_allowed: false
+            risk_allowed: true
+            auto_source: state_registry.counterparty_match
+            reset_on: [counterparty_changed, file_changed]
+            default_assignee: INI
+          - code: INI-07
+            title: "Предмет, результат и границы обязательств соответствуют потребности"
+            appendix3_block: 6
+            na_allowed: false
+            risk_allowed: false
+            reset_on: [subject_changed, file_changed]
+          - code: INI-08
+            title: "Объём, количество и единицы измерения определены и непротиворечивы в договоре, спецификации и приложениях"
+            appendix3_block: 7
+            na_allowed: true
+            risk_allowed: true
+            reset_on: [scope_changed, file_changed]
+          - code: INI-09
+            title: "Сроки поставки, работ, услуг и этапов реалистичны и согласованы с профильным подразделением"
+            appendix3_block: 9
+            na_allowed: false
+            risk_allowed: false
+            reset_on: [dates_changed, file_changed]
+          - code: INI-10
+            title: "Цена, общая сумма, единичные расценки и предел обязательств указаны и совпадают в тексте, спецификации и графике платежей"
+            appendix3_block: 12
+            na_allowed: false
+            risk_allowed: false
+            auto_source: calc.amount_consistency
+            reset_on: [amount_changed, file_changed]
+          - code: INI-11
+            title: "Источник финансирования указан для подтверждения Финансами"
+            appendix3_block: 13
+            na_allowed: true
+            risk_allowed: true
+            applicability: "flags.monetary_obligations == true"
+          - code: INI-12
+            title: "Сведения о подписанте, требуемом сроке подписания и признаке срочности указаны"
+            hint: "п. 4.1.4 Правил"
+            appendix3_block: 5
+            na_allowed: false
+            risk_allowed: true
+      - name: "Признаки маршрутизации и приложения"
+        items:
+          - code: INI-13
+            title: "Признаки карточки заполнены для формирования маршрута: техническая часть, денежные обязательства, IP и ПО, данные, конфиденциальность, государственные органы, ГЧП, государственные закупки, филиал"
+            hint: "п. 3.4 Правил"
+            appendix3_block: 24
+            na_allowed: false
+            risk_allowed: false
+            auto_source: card.routing_flags_filled
+          - code: INI-14
+            title: "Проект, объект, территория и роль филиала указаны корректно"
+            appendix3_block: 24
+            applicability: "flags.branch_involved == true OR flags.ppp_project == true"
+            na_allowed: true
+            risk_allowed: true
+          - code: INI-16
+            title: "Все приложения имеются, взаимно согласованы и соответствуют основному тексту"
+            appendix3_block: 25
+            na_allowed: false
+            risk_allowed: true
+            reset_on: [attachments_changed, file_changed]
+          - code: INI-17
+            title: "Языковые версии согласованы между собой, приоритетная версия определена"
+            appendix3_block: 26
+            applicability: "contract.languages_count > 1"
+            na_allowed: true
+            risk_allowed: true
+      - name: "Отработка замечаний и финальная версия"
+        items:
+          - code: INI-18
+            title: "Замечания отработаны: изменения внесены в Word, ответ зафиксирован напротив каждого замечания, приложены новая редакция и файл сравнения версий"
+            hint: "пп. 3.2.3, 4.2.5 Правил"
+            appendix3_block: 27
+            na_allowed: false
+            risk_allowed: false
+            evidence_required: true
+          - code: INI-19
+            title: "Условия компетенции других подразделений в переговорах самостоятельно не принимались"
+            hint: "п. 4.2.4 Правил"
+            appendix3_block: 27
+            na_allowed: false
+            risk_allowed: true
+          - code: INI-20
+            title: "Финальная версия включает все согласованные изменения и совпадает с редакцией, направляемой контрагенту и подписанту"
+            hint: "п. 4.2.7 Правил"
+            appendix3_block: 28
+            na_allowed: false
+            risk_allowed: false
+            auto_source: version.final_match
+            reset_on: [file_changed]
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - code: accounting_approval
+    name: "Бухгалтерия: реквизиты, налоги, учётные документы"
+    role_code: ACC
+    template_version: 1
+    status: draft
+    is_mandatory: true
+    vnd_decision_ref: null
+    applicability: null
+    sections:
+      - name: "Реквизиты"
+        items:
+          - code: ACC-01
+            title: "Реквизиты контрагента корректны и подтверждены документом контрагента: наименование, БИН или ИИН, адрес, банковские реквизиты (IBAN, БИК, наименование банка)"
+            appendix3_block: 15
+            na_allowed: false
+            risk_allowed: false
+            evidence_required: true
+            auto_source: registry_and_bank.details_match
+            reset_on: [counterparty_changed, file_changed]
+            default_assignee: INI
+          - code: ACC-02
+            title: "Банковские реквизиты не изменялись после согласования; изменение подтверждено по независимому каналу связи с контрагентом"
+            hint: "Контроль подмены реквизитов: подтверждение по ранее известному контакту, не по контактам из письма об изменении"
+            appendix3_block: 15
+            na_allowed: false
+            risk_allowed: false
+            reset_on: [counterparty_changed, bank_details_changed]
+          - code: ACC-03
+            title: "Реквизиты Компании или филиала в договоре указаны верно и актуальны"
+            appendix3_block: 15
+            na_allowed: false
+            risk_allowed: true
+            auto_source: company.details_match
+          - code: ACC-04
+            title: "Получатель платежа совпадает со стороной договора; платежи третьим лицам отсутствуют либо отдельно урегулированы"
+            appendix3_block: 14
+            na_allowed: false
+            risk_allowed: false
+      - name: "Налоги"
+        items:
+          - code: ACC-05
+            title: "Статус контрагента по НДС определён: плательщик или неплательщик, подтверждение приложено"
+            appendix3_block: 15
+            na_allowed: false
+            risk_allowed: false
+            evidence_required: true
+            auto_source: tax_service.vat_status
+          - code: ACC-06
+            title: "Режим налогообложения контрагента определён"
+            appendix3_block: 15
+            na_allowed: false
+            risk_allowed: true
+            evidence_required: true
+          - code: ACC-07
+            title: "Условия о НДС соответствуют статусу контрагента: ставка, сумма выделена, при неплательщике указано основание"
+            appendix3_block: 15
+            na_allowed: false
+            risk_allowed: false
+            reset_on: [amount_changed, file_changed, counterparty_changed]
+          - code: ACC-08
+            title: "Арифметика проверена: сумма позиций, итог и выделенный НДС сходятся в договоре, спецификации и графике платежей"
+            appendix3_block: 12
+            na_allowed: false
+            risk_allowed: false
+            auto_source: calc.vat_and_totals
+            reset_on: [amount_changed, file_changed]
+          - code: ACC-09
+            title: "Налоговая дисциплина контрагента проверена: отсутствие налоговой задолженности, контрагент не признан бездействующим и не включён в перечни ненадёжных налогоплательщиков"
+            appendix3_block: 23
+            na_allowed: false
+            risk_allowed: true
+            evidence_required: true
+            auto_source: tax_service.compliance_profile
+          - code: ACC-10
+            title: "Риск непризнания расходов и снятия НДС из зачёта оценён: признаки неисполнения контрагентом налоговых обязанностей отсутствуют"
+            appendix3_block: 15
+            na_allowed: false
+            risk_allowed: true
+            auto_source: tax_service.risk_indicators
+          - code: ACC-11
+            title: "Договор с физическим лицом: удержания и обязательные платежи определены, признаки трудовых отношений отсутствуют"
+            appendix3_block: 15
+            applicability: "counterparty.is_individual == true"
+            na_allowed: false
+            risk_allowed: false
+          - code: ACC-12
+            title: "Для нерезидента: обязанности налогового агента определены; необходимость сертификата резидентства и применение международного договора об избежании двойного налогообложения подтверждены"
+            appendix3_block: 15
+            applicability: "counterparty.is_resident == false"
+            na_allowed: false
+            risk_allowed: false
+            evidence_required: true
+          - code: ACC-13
+            title: "Требования валютного законодательства учтены: регистрация или учётный номер контракта в банке, сроки репатриации, коды операций"
+            appendix3_block: 15
+            applicability: "contract.currency != 'KZT' OR counterparty.is_resident == false"
+            na_allowed: false
+            risk_allowed: false
+      - name: "Документы и учёт"
+        items:
+          - code: ACC-14
+            title: "Обязанность и срок выписки ЭСФ в информационной системе закреплены"
+            appendix3_block: 15
+            na_allowed: true
+            risk_allowed: false
+          - code: ACC-15
+            title: "Перечень и формы закрывающих документов определены, сроки предоставления указаны"
+            appendix3_block: 15
+            na_allowed: false
+            risk_allowed: false
+          - code: ACC-16
+            title: "Периодичность закрывающих документов соответствует учётным периодам"
+            appendix3_block: 15
+            na_allowed: true
+            risk_allowed: true
+          - code: ACC-17
+            title: "Порядок учёта аванса и его зачёта определён, налоговые последствия аванса учтены"
+            appendix3_block: 14
+            applicability: "contract.has_advance == true"
+            na_allowed: false
+            risk_allowed: true
+          - code: ACC-18
+            title: "Учётные реквизиты определены: статья затрат, объект учёта, проект, подразделение или филиал"
+            appendix3_block: 15
+            na_allowed: false
+            risk_allowed: true
+            auto_source: erp.cost_allocation_filled
+          - code: ACC-19
+            title: "Условия оплаты позволяют исполнить платёж: реквизиты, назначение платежа, документ-основание, срок"
+            appendix3_block: 14
+            na_allowed: false
+            risk_allowed: true
+            reset_on: [payment_terms_changed, file_changed]
+          - code: ACC-20
+            title: "Порядок документального оформления неустоек, скидок и премий определён"
+            appendix3_block: 15
+            na_allowed: true
+            risk_allowed: true
+          - code: ACC-21
+            title: "Для аренды и лизинга данных достаточно для отражения в учёте"
+            appendix3_block: 15
+            applicability: "contract.kind == 'lease'"
+            na_allowed: true
+            risk_allowed: true
+      - name: "Исполнение и закрытие (Приложение 4)"
+        items:
+          - code: ACC-22
+            title: "ЭСФ и учётные документы получены и обработаны"
+            appendix3_block: A4
+            na_allowed: false
+            risk_allowed: true
+            evidence_required: true
+          - code: ACC-23
+            title: "Завершение финансовых обязательств и расчётов по договору подтверждено; договор может быть закрыт"
+            hint: "п. 4.4.7 Правил"
+            appendix3_block: A4
+            na_allowed: false
+            risk_allowed: false
+
+  # ───────────────────────────────────────────────────────────────────────────
+  - code: finance_approval
+    name: "Финансы: бюджет, цена, график платежей, финансовые риски"
+    role_code: FIN
+    template_version: 1
+    status: draft
+    is_mandatory: true
+    vnd_decision_ref: null
+    applicability: "flags.monetary_obligations == true"
+    sections:
+      - name: "Бюджет и лимиты"
+        items:
+          - code: FIN-01
+            title: "Источник финансирования определён и подтверждён"
+            appendix3_block: 13
+            na_allowed: false
+            risk_allowed: false
+          - code: FIN-02
+            title: "Наличие бюджета и свободного лимита подтверждено, бюджетная позиция указана"
+            appendix3_block: 13
+            na_allowed: false
+            risk_allowed: false
+            auto_source: budget.limit_available
+            reset_on: [amount_changed]
+            default_assignee: INI
+          - code: FIN-11
+            title: "Финансовые лимиты соблюдены, лимит на контрагента или группу не превышен"
+            appendix3_block: 13
+            na_allowed: true
+            risk_allowed: true
+            auto_source: risk.counterparty_exposure
+      - name: "Цена и предел обязательств"
+        items:
+          - code: FIN-03
+            title: "Цена, общая сумма и единичные расценки согласованы и непротиворечивы в договоре, спецификации и графике платежей"
+            appendix3_block: 12
+            na_allowed: false
+            risk_allowed: true
+            auto_source: calc.amount_consistency
+            reset_on: [amount_changed, file_changed]
+          - code: FIN-04
+            title: "Предел обязательств Компании определён; для рамочного договора установлена максимальная сумма"
+            appendix3_block: 12
+            na_allowed: false
+            risk_allowed: false
+            reset_on: [amount_changed, file_changed]
+          - code: FIN-05
+            title: "Финансовая модель либо обоснование цены приложены"
+            appendix3_block: 12
+            applicability: "contract.amount > thresholds.financial_model_amount"
+            na_allowed: true
+            risk_allowed: true
+            evidence_required: true
+          - code: FIN-12
+            title: "Механизм индексации или изменения цены ограничен потолком и периодичностью; эффект рассчитан"
+            appendix3_block: 12
+            na_allowed: true
+            risk_allowed: true
+          - code: FIN-13
+            title: "Скрытые финансовые обязательства отсутствуют: минимальный объём, платные опции, плата за досрочное прекращение"
+            appendix3_block: 12
+            na_allowed: true
+            risk_allowed: true
+      - name: "Платежи и валюта"
+        items:
+          - code: FIN-06
+            title: "Валюта договора и валюта платежа определены; курс и дата пересчёта установлены"
+            appendix3_block: 14
+            applicability: "contract.currency != 'KZT'"
+            na_allowed: false
+            risk_allowed: true
+          - code: FIN-07
+            title: "Курсовой риск оценён, при необходимости предусмотрены коридор или иной механизм ограничения"
+            appendix3_block: 14
+            applicability: "contract.currency != 'KZT'"
+            na_allowed: true
+            risk_allowed: true
+          - code: FIN-08
+            title: "Доля аванса соответствует политике Компании"
+            appendix3_block: 14
+            applicability: "contract.has_advance == true"
+            na_allowed: false
+            risk_allowed: true
+            reset_on: [payment_terms_changed]
+          - code: FIN-09
+            title: "При авансе свыше порога предусмотрено обеспечение его возврата"
+            appendix3_block: 14
+            applicability: "contract.advance_share > thresholds.advance_guarantee_share"
+            na_allowed: false
+            risk_allowed: false
+            evidence_required: true
+          - code: FIN-10
+            title: "Этапность, сроки и условия платежа финансово исполнимы; влияние на денежный поток оценено"
+            appendix3_block: 14
+            na_allowed: false
+            risk_allowed: true
+            auto_source: treasury.cashflow_impact
+            reset_on: [payment_terms_changed, dates_changed, file_changed]
+      - name: "Финансовые риски"
+        items:
+          - code: FIN-14
+            title: "Неустойки в пользу Компании достаточны; денежные обязательства Компании по ответственности ограничены по сумме"
+            appendix3_block: 16
+            na_allowed: true
+            risk_allowed: true
+          - code: FIN-15
+            title: "Платёжеспособность контрагента проверена"
+            appendix3_block: 23
+            applicability: "contract.has_advance == true OR contract.amount > thresholds.solvency_check_amount"
+            na_allowed: false
+            risk_allowed: true
+            evidence_required: true
+            auto_source: counterparty_check.financials
+          - code: FIN-16
+            title: "Финансовые последствия автоматического продления учтены, срок уведомления об отказе поставлен на контроль"
+            appendix3_block: 17
+            applicability: "contract.has_auto_renewal == true"
+            na_allowed: false
+            risk_allowed: true
+            auto_source: contract.renewal_control_task
+      - name: "Исполнение (Приложение 4)"
+        items:
+          - code: FIN-17
+            title: "Платежи произведены в соответствии с условиями либо основания неплатежа зафиксированы"
+            appendix3_block: A4
+            na_allowed: false
+            risk_allowed: true
+            evidence_required: true
+
+# Остальные шаблоны описываются в том же формате:
+#   initiator_signing (INI-21…INI-28: подписание, оригинал, исполнение, закрытие),
+#   manager_approval (MGR), procurement_card (PRC), legal_review (LAW),
+#   technical_approval (TEC), infosec_approval (SEC), compliance_review (CMP),
+#   signatory_admission (SGN), ceo_risk_decision (CEO), controller_execution (CTL).
+# Формулировки, блоки Приложения 3, признаки «!» (risk_allowed: false), автопроверки
+# и условия применимости — docs/checklists-by-role.md, разделы 2-4 и 7-12.

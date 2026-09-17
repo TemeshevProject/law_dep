@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+"""Сборка документов Word из исходных файлов в Markdown.
+
+Использование:
+    python3 tools/build-docx.py [--target full|short] [--pandoc PATH] [--out FILE]
+
+Требуется pandoc 3.x. Скрипт формирует временный reference.docx (сетка в таблицах,
+нумерация страниц, автообновление оглавления) и собирает:
+  full  — подробное ТЗ вместе с Приложениями А и Б, альбомный A4 (широкие таблицы);
+  short — краткое ТЗ по ролям, книжный A4.
+"""
+
+import argparse
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+TZ = ROOT / "docs" / "tz-checklists-contract-approval.md"
+APPENDIX_A = ROOT / "docs" / "checklists-by-role.md"
+APPENDIX_B = ROOT / "docs" / "checklists" / "contract-approval-checklists.yaml"
+SHORT = ROOT / "docs" / "tz-checklists-short.md"
+DEFAULT_OUT = {
+    "full": ROOT / "docs" / "tz-checklists-contract-approval.docx",
+    "short": ROOT / "docs" / "tz-checklists-short.docx",
+}
+
+PAGE_BREAK = '\n\n```{=openxml}\n<w:p><w:r><w:br w:type="page"/></w:r></w:p>\n```\n\n'
+
+# Ссылки на отдельные файлы в едином документе теряют смысл
+LINK_REWRITES = {
+    "`docs/checklists-by-role.md`": "Приложение А настоящего документа",
+    "`docs/checklists/contract-approval-checklists.yaml`": "Приложение Б настоящего документа",
+    "`docs/tz-checklists-contract-approval.md`": "основной текст настоящего ТЗ",
+}
+
+METADATA = """---
+title: "Чек-листы согласования договоров в SimBASE"
+subtitle: "Техническое задание. Версия 0.2 (проект). Включает Приложения А и Б"
+date: "ТОО «Көркем Телеком», 2026"
+lang: ru-RU
+toc-title: "Содержание"
+---
+"""
+
+METADATA_SHORT = """---
+title: "Чек-листы согласования договоров: краткое ТЗ"
+subtitle: "Что проверяет каждая роль. Версия 0.2 (проект)"
+date: "ТОО «Көркем Телеком», 2026"
+lang: ru-RU
+toc-title: "Содержание"
+---
+"""
+
+# В отдельном кратком документе ссылки на файлы репозитория не нужны
+SHORT_LINK_REWRITES = {
+    "(`docs/tz-checklists-contract-approval.md`) и Приложении А\n(`docs/checklists-by-role.md`)":
+        "и Приложении А к нему",
+}
+
+APPENDIX_B_INTRO = """# Приложение Б. Машиночитаемый формат шаблонов чек-листов
+
+Формат выгрузки и загрузки шаблонов чек-листов (основной текст ТЗ, FR-01 и FR-02).
+Ниже приведено содержимое файла `contract-approval-checklists.yaml`: описание схемы,
+четыре статуса пункта по п. 3.1 Правил, признаки карточки для условий применимости
+и полностью описанные шаблоны трёх ролей как эталон формата.
+
+"""
+
+
+def proportional_table_widths(text: str, budget: int = 180, cap: int = 80) -> str:
+    """Задать ширину колонок пропорционально содержимому.
+
+    Pandoc берёт относительную ширину колонок из числа дефисов в строке-разделителе
+    pipe-таблицы. В исходных файлах разделители записаны как `|---|`, поэтому в Word
+    все колонки получают равную ширину: узкие («Блок», «Флаги») раздуваются,
+    а колонка с формулировкой сжимается. Здесь разделитель перестраивается по
+    фактической длине содержимого, с ограничением cap, чтобы одна длинная колонка
+    не вытеснила остальные.
+    """
+    separator = re.compile(r"^\|(?:\s*:?-{2,}:?\s*\|)+\s*$")
+    lines = text.split("\n")
+    blocks: list[tuple[int, int]] = []
+    start = None
+    for i, line in enumerate(lines + [""]):
+        if line.startswith("|"):
+            start = i if start is None else start
+        elif start is not None:
+            blocks.append((start, i))
+            start = None
+
+    for first, last in blocks:
+        rows = [lines[i] for i in range(first, last)]
+        sep_idx = next((i for i, r in enumerate(rows) if separator.match(r)), None)
+        if sep_idx is None:
+            continue
+        cells = [[c.strip() for c in r.strip().strip("|").split("|")] for r in rows]
+        columns = len(cells[sep_idx])
+        if columns < 2:
+            continue
+        weights = []
+        for col in range(columns):
+            longest = max(
+                (len(row[col]) for row in cells if len(row) == columns and row is not cells[sep_idx]),
+                default=3,
+            )
+            # +5 и нижняя граница: короткие колонки («Код», «Блок») не должны
+            # сжиматься до переноса собственного заголовка
+            weights.append(max(min(longest, cap) + 5, 14))
+        total = sum(weights)
+        dashes = [max(3, round(w / total * budget)) for w in weights]
+        lines[first + sep_idx] = "|" + "|".join("-" * d for d in dashes) + "|"
+
+    return "\n".join(lines)
+
+
+def rewrite_links(text: str) -> str:
+    for src, dst in LINK_REWRITES.items():
+        text = text.replace(src, dst)
+    return text
+
+
+def build_markdown() -> str:
+    tz = rewrite_links(TZ.read_text(encoding="utf-8"))
+
+    # Раздел со ссылками на отдельные файлы заменяем указанием на части документа
+    tz = re.sub(
+        r"## Приложения к ТЗ\n(?:.*\n)*?\Z",
+        "## Приложения к ТЗ\n\n"
+        "- **Приложение А.** Чек-листы согласования договора по ролям — приведено ниже.\n"
+        "- **Приложение Б.** Машиночитаемый формат шаблонов чек-листов — приведено ниже.\n",
+        tz,
+    )
+
+    appendix_a = rewrite_links(APPENDIX_A.read_text(encoding="utf-8"))
+    appendix_b = APPENDIX_B_INTRO + "```yaml\n" + APPENDIX_B.read_text(encoding="utf-8") + "```\n"
+
+    body = PAGE_BREAK + tz + PAGE_BREAK + appendix_a
+    return METADATA + proportional_table_widths(body) + PAGE_BREAK + appendix_b
+
+
+def build_markdown_short() -> str:
+    text = SHORT.read_text(encoding="utf-8")
+    for src, dst in SHORT_LINK_REWRITES.items():
+        text = text.replace(src, dst)
+    # Заголовок первого уровня дублирует титульный лист
+    text = re.sub(r"\A# .*\n", "", text)
+    return METADATA_SHORT + PAGE_BREAK + proportional_table_widths(text, budget=110)
+
+
+def patch_reference(pandoc: str, work: Path, landscape: bool = True) -> Path:
+    """reference.docx pandoc по умолчанию: книжная ориентация, таблицы без сетки."""
+    ref = work / "reference.docx"
+    with ref.open("wb") as fh:
+        subprocess.run([pandoc, "--print-default-data-file", "reference.docx"], stdout=fh, check=True)
+
+    unpacked = work / "ref"
+    with zipfile.ZipFile(ref) as z:
+        z.extractall(unpacked)
+
+    page = (
+        '<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>'
+        if landscape
+        else '<w:pgSz w:w="11906" w:h="16838"/>'
+    )
+    margin = 851 if landscape else 1134
+    sect = (
+        "<w:sectPr>"
+        '<w:footerReference w:type="default" r:id="rIdFtr1"/>'
+        f"{page}"
+        f'<w:pgMar w:top="{margin}" w:right="{margin}" w:bottom="{margin}" w:left="{margin}"'
+        ' w:header="425" w:footer="425" w:gutter="0"/>'
+        "</w:sectPr>"
+    )
+    document = unpacked / "word" / "document.xml"
+    text = document.read_text(encoding="utf-8").replace("<w:sectPr />", sect, 1)
+    document.write_text(text, encoding="utf-8")
+
+    styles = unpacked / "word" / "styles.xml"
+    text = styles.read_text(encoding="utf-8")
+    text = text.replace(
+        '<w:sz w:val="24" />\n        <w:szCs w:val="24" />',
+        '<w:sz w:val="22" />\n        <w:szCs w:val="22" />',
+        1,
+    )
+    text = text.replace(
+        '<w:lang w:val="en-US" w:eastAsia="en-US" w:bidi="ar-SA" />',
+        '<w:lang w:val="ru-RU" w:eastAsia="ru-RU" w:bidi="ar-SA" />',
+        1,
+    )
+    borders = "".join(
+        f'<w:{edge} w:val="single" w:sz="4" w:color="BFBFBF"/>'
+        for edge in ("top", "left", "bottom", "right", "insideH", "insideV")
+    )
+    text = text.replace(
+        '<w:tblPr>\n      <w:tblInd w:w="0" w:type="dxa" />',
+        f"<w:tblPr>\n      <w:tblBorders>{borders}</w:tblBorders>\n      "
+        '<w:tblInd w:w="0" w:type="dxa" />',
+        1,
+    )
+    text = text.replace(
+        '<w:tcPr>\n          <w:vAlign w:val="bottom"/>',
+        '<w:tcPr>\n          <w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/>\n'
+        '          <w:vAlign w:val="bottom"/>',
+        1,
+    )
+    styles.write_text(text, encoding="utf-8")
+
+    grey = '<w:rPr><w:sz w:val="18"/><w:color w:val="808080"/></w:rPr>'
+    (unpacked / "word" / "footer1.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">\n'
+        f'  <w:p><w:pPr><w:jc w:val="center"/>{grey}</w:pPr>\n'
+        f'    <w:r>{grey}<w:fldChar w:fldCharType="begin"/></w:r>\n'
+        f'    <w:r>{grey}<w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>\n'
+        f'    <w:r>{grey}<w:fldChar w:fldCharType="end"/></w:r>\n'
+        "  </w:p>\n</w:ftr>\n",
+        encoding="utf-8",
+    )
+
+    content_types = unpacked / "[Content_Types].xml"
+    content_types.write_text(
+        content_types.read_text(encoding="utf-8").replace(
+            "</Types>",
+            '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxml'
+            'formats-officedocument.wordprocessingml.footer+xml" /></Types>',
+        ),
+        encoding="utf-8",
+    )
+
+    rels = unpacked / "word" / "_rels" / "document.xml.rels"
+    rels.write_text(
+        rels.read_text(encoding="utf-8").replace(
+            "</Relationships>",
+            '<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+            'relationships/footer" Id="rIdFtr1" Target="footer1.xml" /></Relationships>',
+        ),
+        encoding="utf-8",
+    )
+
+    patched = work / "reference-landscape.docx"
+    with zipfile.ZipFile(patched, "w", zipfile.ZIP_DEFLATED) as z:
+        for path in sorted(unpacked.rglob("*")):
+            if path.is_file():
+                z.write(path, path.relative_to(unpacked).as_posix())
+    return patched
+
+
+def enable_field_update(docx_path: Path) -> None:
+    """Word должен заполнить поле оглавления при открытии.
+
+    settings.xml pandoc формирует самостоятельно, игнорируя reference.docx,
+    поэтому флаг добавляется в готовый файл. Элемент ставится перед <w:rsids>,
+    чтобы сохранить порядок элементов CT_Settings.
+    """
+    part = "word/settings.xml"
+    with zipfile.ZipFile(docx_path) as z:
+        entries = {name: z.read(name) for name in z.namelist()}
+
+    settings = entries[part].decode("utf-8")
+    if "updateFields" in settings:
+        return
+    flag = '<w:updateFields w:val="true"/>'
+    if "<w:rsids>" in settings:
+        settings = settings.replace("<w:rsids>", f"{flag}<w:rsids>", 1)
+    else:
+        settings = settings.replace("</w:settings>", f"{flag}</w:settings>", 1)
+    entries[part] = settings.encode("utf-8")
+
+    with zipfile.ZipFile(docx_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in entries.items():
+            z.writestr(name, data)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--target", choices=("full", "short"), default="full")
+    parser.add_argument("--pandoc", default=shutil.which("pandoc") or "pandoc")
+    parser.add_argument("--out", type=Path)
+    args = parser.parse_args()
+    out = args.out or DEFAULT_OUT[args.target]
+
+    if not shutil.which(args.pandoc) and not Path(args.pandoc).is_file():
+        print(f"pandoc не найден: {args.pandoc}", file=sys.stderr)
+        return 1
+
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        combined = work / "combined.md"
+        combined.write_text(
+            build_markdown() if args.target == "full" else build_markdown_short(),
+            encoding="utf-8",
+        )
+        reference = patch_reference(args.pandoc, work, landscape=args.target == "full")
+        subprocess.run(
+            [
+                args.pandoc,
+                str(combined),
+                "--from=markdown",
+                "--to=docx",
+                f"--reference-doc={reference}",
+                "--toc",
+                "--toc-depth=2",
+                f"--output={out}",
+            ],
+            check=True,
+        )
+
+    enable_field_update(out)
+    print(f"готово: {out} ({out.stat().st_size // 1024} КБ)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
